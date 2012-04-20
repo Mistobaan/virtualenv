@@ -997,7 +997,7 @@ class PythonDistributionDelegate(object):
 
         self.clear()
 
-        res = self.install_python(site_packages=self._options.system_site_packages)
+        res = self.install_python()
 
         self._py_executable = os.path.abspath(res)
 
@@ -1028,23 +1028,53 @@ class PythonDistributionDelegate(object):
                     file_list.append((source, dest))
         return file_list
 
-
-    def install_python(self, site_packages=False):
-        """Install just the base environment, no distutils patches etc"""
+    def copy_site_packages(self):
         home_dir = self._home_dir
-        lib_dir = self._lib_dir
-        inc_dir = self._inc_dir
-        bin_dir = self._bin_dir
+        mkdir(join(self._lib_dir, 'site-packages'))
+        import site
+        site_filename = site.__file__
+        if site_filename.endswith('.pyc'):
+            site_filename = site_filename[:-1]
+        elif site_filename.endswith('$py.class'):
+            site_filename = site_filename.replace('$py.class', '.py')
+        site_filename_dst = change_prefix(site_filename, home_dir)
+        site_dir = os.path.dirname(site_filename_dst)
+        writefile(site_filename_dst, SITE_PY)
+        writefile(join(site_dir, 'orig-prefix.txt'), self.prefix)
+        site_packages_filename = join(site_dir, 'no-global-site-packages.txt')
+        if not self._options.system_site_packages:
+            writefile(site_packages_filename, '')
+        else:
+            if os.path.exists(site_packages_filename):
+                logger.info('Deleting %s' % site_packages_filename)
+                os.unlink(site_packages_filename)
 
-        if sys.executable.startswith(bin_dir):
-            print('Please use the *system* python to run this script')
-            return
-
+    @property
+    def prefix(self):
         if hasattr(sys, 'real_prefix'):
             logger.notify('Using real prefix %r' % sys.real_prefix)
             prefix = sys.real_prefix
         else:
             prefix = sys.prefix
+        return prefix
+
+    def copy_stdinc(self):
+        if os.path.exists(self._stdinc_dir):
+            self._fs.copyfile(self._stdinc_dir, self._inc_dir)
+        else:
+            logger.debug('No include dir %s' % self._stdinc_dir)
+
+    def install_python(self):
+        """Install just the base environment, no distutils patches etc"""
+        home_dir = self._home_dir
+        lib_dir = self._lib_dir
+        inc_dir = self._inc_dir
+        bin_dir = self._bin_dir
+        prefix = self.prefix
+
+        if sys.executable.startswith(bin_dir):
+            print('Please use the *system* python to run this script')
+            return
 
         self._fs.mkdir(self._lib_dir)
         self.fix_lib64()
@@ -1064,36 +1094,11 @@ class PythonDistributionDelegate(object):
         finally:
             logger.indent -= 2
 
-        mkdir(join(self._lib_dir, 'site-packages'))
-        import site
-        site_filename = site.__file__
-        if site_filename.endswith('.pyc'):
-            site_filename = site_filename[:-1]
-        elif site_filename.endswith('$py.class'):
-            site_filename = site_filename.replace('$py.class', '.py')
-        site_filename_dst = change_prefix(site_filename, home_dir)
-        site_dir = os.path.dirname(site_filename_dst)
-        writefile(site_filename_dst, SITE_PY)
-        writefile(join(site_dir, 'orig-prefix.txt'), prefix)
-        site_packages_filename = join(site_dir, 'no-global-site-packages.txt')
-        if not site_packages:
-            writefile(site_packages_filename, '')
-        else:
-            if os.path.exists(site_packages_filename):
-                logger.info('Deleting %s' % site_packages_filename)
-                os.unlink(site_packages_filename)
-
-        if is_pypy or is_win:
-            stdinc_dir = join(prefix, 'include')
-        else:
-            stdinc_dir = join(prefix, 'include', py_version + abiflags)
-        if os.path.exists(stdinc_dir):
-            copyfile(stdinc_dir, inc_dir)
-        else:
-            logger.debug('No include dir %s' % stdinc_dir)
+        self.copy_site_packages()
+        self.copy_stdinc()
 
         # pypy never uses exec_prefix, just ignore it
-        if sys.exec_prefix != prefix and not is_pypy:
+        if sys.exec_prefix != self.prefix and not is_pypy:
             if sys.platform == 'win32':
                 exec_dir = join(sys.exec_prefix, 'lib')
             elif is_jython:
@@ -1414,6 +1419,7 @@ class Win32Distribution(PythonDistributionDelegate):
         self._lib_dir = join(home_dir, 'Lib')
         self._inc_dir = join(home_dir, 'Include')
         self._bin_dir = join(home_dir, 'Scripts')
+        self._stdinc_dir = join(self.prefix, 'include')
 
     def stdlib_dirs(self):
         stdlib_dirs = [os.path.dirname(os.__file__)]
@@ -1433,6 +1439,7 @@ class PyPyDistribution(PythonDistributionDelegate):
         self._lib_dir = home_dir
         self._inc_dir = join(home_dir, 'include')
         self._bin_dir = join(home_dir, 'bin')
+        self._stdinc_dir = join(self.prefix, 'include')
 
 class UnixDistribution(PythonDistributionDelegate):
 
@@ -1440,6 +1447,7 @@ class UnixDistribution(PythonDistributionDelegate):
         self._lib_dir = join(self._home_dir, 'lib', py_version)
         self._inc_dir = join(self._home_dir, 'include', py_version + abiflags)
         self._bin_dir = join(self._home_dir, 'bin')
+        self._stdinc_dir = join(self.prefix, 'include', py_version + abiflags)
 
     def stdlib_dirs(self):
         stdlib_dirs = [os.path.dirname(os.__file__)]
