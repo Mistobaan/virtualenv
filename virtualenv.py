@@ -934,7 +934,17 @@ def main():
                     'the default behavior.')
 
     if options.experimental:
-        env = EnvironmentBuilder(home, options)
+        if sys.platform == 'win32':
+            env_klass = Win32Distribution
+        elif is_pypy:
+            env_klass = PyPyDistribution
+        elif is_jython:
+            env_klass = JythonDistribution
+        else:
+            env_klass = UnixDistribution
+
+        print env_klass
+        env = env_klass(FileSystemService(), home_dir, options)
         env.create()
     else:
         create_environment(home_dir,
@@ -950,22 +960,109 @@ def main():
     if 'after_install' in globals():
         after_install(options, home_dir)
 
-class EnvironmentBuilder(object):
+class FileSystemService(object):
 
-    def __init__(self, home_dir, options):
+    def mkdir(self, *args):
+        mkdir(*args)
+
+class PythonDistributionDelegate(object):
+
+    def __init__(self, fs, home_dir, options):
         self._home_dir = home_dir
+        self._fs = fs
         self._options = options
+
+    def path_locations(self):
+        raise NotImplementedError
 
     def create(self):
         options = self._options
-        create_environment(self._home_dir,
-                       site_packages=options.system_site_packages,
-                       clear=options.clear,
-                       unzip_setuptools=options.unzip_setuptools,
-                       use_distribute=options.use_distribute,
-                       prompt=options.prompt,
-                       search_dirs=options.search_dirs,
-                       never_download=options.never_download)
+        #create_environment(self._home_dir,
+        #               site_packages=options.system_site_packages,
+        #               clear=options.clear,
+        #               unzip_setuptools=options.unzip_setuptools,
+        #               use_distribute=options.use_distribute,
+        #               prompt=options.prompt,
+        #               search_dirs=options.search_dirs,
+        #               never_download=options.never_download)
+        """
+        Creates a new environment in ``home_dir``.
+    
+        If ``site_packages`` is true, then the global ``site-packages/``
+        directory will be on the path.
+    
+        If ``clear`` is true (default False) then the environment will
+        first be cleared.
+        """
+        # home_dir, lib_dir, inc_dir, bin_dir = path_locations(home_dir)
+        self.path_locations()
+
+        py_executable = os.path.abspath(install_python(
+        self._home_dir, self._lib_dir, self._inc_dir, self._bin_dir,
+            site_packages=self._options.system_site_packages, clear=self._options.clear))
+
+        install_distutils(self._home_dir)
+
+        # use_distribute also is True if VIRTUALENV_DISTRIBUTE env var is set
+        # we also check VIRTUALENV_USE_DISTRIBUTE for backwards compatibility
+        if self._options.use_distribute or os.environ.get('VIRTUALENV_USE_DISTRIBUTE'):
+            install_distribute(py_executable, unzip=self._options.unzip_setuptools,
+                               search_dirs=self._options.search_dirs,
+                               never_download=self._options.never_download)
+        else:
+            install_setuptools(py_executable, unzip=self._options.unzip_setuptools,
+                               search_dirs=self._options.search_dirs,
+                               never_download=self._options.never_download)
+
+        install_pip(py_executable, search_dirs=self._options.search_dirs,
+                    never_download=self._options.never_download)
+
+    def install_activate(self):
+        install_activate(self._home_dir, self._bin_dir, self._options.prompt)
+
+
+class Win32Distribution(PythonDistributionDelegate):
+
+    def path_locations(self):
+        # Windows has lots of problems with executables with spaces in
+        # the name; this function will remove them (using the ~1
+        # format):
+        self._fs.mkdir(self._home_dir)
+        if ' ' in home_dir:
+            try:
+                import win32api
+            except ImportError:
+                print('Error: the path "%s" has a space in it' % home_dir)
+                print('To handle these kinds of paths, the win32api module must be installed:')
+                print('  http://sourceforge.net/projects/pywin32/')
+                sys.exit(3)
+            home_dir = win32api.GetShortPathName(home_dir)
+        self._lib_dir = join(home_dir, 'Lib')
+        self._inc_dir = join(home_dir, 'Include')
+        self._bin_dir = join(home_dir, 'Scripts')
+
+
+class JythonDistribution(PythonDistributionDelegate):
+
+    def path_locations(self):
+        self._lib_dir = join(self._home_dir, 'Lib')
+        self._inc_dir = join(self._home_dir, 'Include')
+        self._bin_dir = join(self._home_dir, 'bin')
+
+class PyPyDistribution(PythonDistributionDelegate):
+
+    def path_locations(self):
+        self._lib_dir = home_dir
+        self._inc_dir = join(home_dir, 'include')
+        self._bin_dir = join(home_dir, 'bin')
+
+class UnixDistribution(PythonDistributionDelegate):
+
+    def path_locations(self):
+        self._lib_dir = join(self._home_dir, 'lib', py_version)
+        self._inc_dir = join(self._home_dir, 'include', py_version + abiflags)
+        self._bin_dir = join(self._home_dir, 'bin')
+
 
 def call_subprocess(cmd, show_stdout=True,
                     filter_stdout=None, cwd=None,
@@ -1046,77 +1143,6 @@ def call_subprocess(cmd, show_stdout=True,
             logger.warn(
                 "Command %s had error code %s"
                 % (cmd_desc, proc.returncode))
-
-
-def create_environment(home_dir, site_packages=False, clear=False,
-                       unzip_setuptools=False, use_distribute=False,
-                       prompt=None, search_dirs=None, never_download=False):
-    """
-    Creates a new environment in ``home_dir``.
-
-    If ``site_packages`` is true, then the global ``site-packages/``
-    directory will be on the path.
-
-    If ``clear`` is true (default False) then the environment will
-    first be cleared.
-    """
-    home_dir, lib_dir, inc_dir, bin_dir = path_locations(home_dir)
-
-    py_executable = os.path.abspath(install_python(
-        home_dir, lib_dir, inc_dir, bin_dir,
-        site_packages=site_packages, clear=clear))
-
-    install_distutils(home_dir)
-
-    # use_distribute also is True if VIRTUALENV_DISTRIBUTE env var is set
-    # we also check VIRTUALENV_USE_DISTRIBUTE for backwards compatibility
-    if use_distribute or os.environ.get('VIRTUALENV_USE_DISTRIBUTE'):
-        install_distribute(py_executable, unzip=unzip_setuptools,
-                           search_dirs=search_dirs, never_download=never_download)
-    else:
-        install_setuptools(py_executable, unzip=unzip_setuptools,
-                           search_dirs=search_dirs, never_download=never_download)
-
-    install_pip(py_executable, search_dirs=search_dirs, never_download=never_download)
-
-    install_activate(home_dir, bin_dir, prompt)
-
-def path_locations(home_dir):
-    """Return the path locations for the environment (where libraries are,
-    where scripts go, etc)"""
-    # XXX: We'd use distutils.sysconfig.get_python_inc/lib but its
-    # prefix arg is broken: http://bugs.python.org/issue3386
-    if sys.platform == 'win32':
-        # Windows has lots of problems with executables with spaces in
-        # the name; this function will remove them (using the ~1
-        # format):
-        mkdir(home_dir)
-        if ' ' in home_dir:
-            try:
-                import win32api
-            except ImportError:
-                print('Error: the path "%s" has a space in it' % home_dir)
-                print('To handle these kinds of paths, the win32api module must be installed:')
-                print('  http://sourceforge.net/projects/pywin32/')
-                sys.exit(3)
-            home_dir = win32api.GetShortPathName(home_dir)
-        lib_dir = join(home_dir, 'Lib')
-        inc_dir = join(home_dir, 'Include')
-        bin_dir = join(home_dir, 'Scripts')
-    if is_jython:
-        lib_dir = join(home_dir, 'Lib')
-        inc_dir = join(home_dir, 'Include')
-        bin_dir = join(home_dir, 'bin')
-    elif is_pypy:
-        lib_dir = home_dir
-        inc_dir = join(home_dir, 'include')
-        bin_dir = join(home_dir, 'bin')
-    elif sys.platform != 'win32':
-        lib_dir = join(home_dir, 'lib', py_version)
-        inc_dir = join(home_dir, 'include', py_version + abiflags)
-        bin_dir = join(home_dir, 'bin')
-    return home_dir, lib_dir, inc_dir, bin_dir
-
 
 def change_prefix(filename, dst_prefix):
     prefixes = [sys.prefix]
