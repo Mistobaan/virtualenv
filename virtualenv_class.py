@@ -1040,7 +1040,7 @@ class PythonDistributionDelegate(object):
         site_filename_dst = change_prefix(site_filename, home_dir)
         site_dir = os.path.dirname(site_filename_dst)
         writefile(site_filename_dst, SITE_PY)
-        writefile(join(site_dir, 'orig-prefix.txt'), self.prefix)
+        writefile(join(site_dir, 'orig-prefix.txt'), self.prefix())
         site_packages_filename = join(site_dir, 'no-global-site-packages.txt')
         if not self._options.system_site_packages:
             writefile(site_packages_filename, '')
@@ -1049,7 +1049,6 @@ class PythonDistributionDelegate(object):
                 logger.info('Deleting %s' % site_packages_filename)
                 os.unlink(site_packages_filename)
 
-    @property
     def prefix(self):
         if hasattr(sys, 'real_prefix'):
             logger.notify('Using real prefix %r' % sys.real_prefix)
@@ -1070,7 +1069,7 @@ class PythonDistributionDelegate(object):
         lib_dir = self._lib_dir
         inc_dir = self._inc_dir
         bin_dir = self._bin_dir
-        prefix = self.prefix
+        prefix = self.prefix()
 
         if sys.executable.startswith(bin_dir):
             print('Please use the *system* python to run this script')
@@ -1089,8 +1088,6 @@ class PythonDistributionDelegate(object):
             for src, dest in self.list_required_lib_files(stdlib_dirs):
                 self._fs.copyfile(src, dest)
             self.copy_required_modules()
-        except:
-            logger.error(sys.exc_info[1])
         finally:
             logger.indent -= 2
 
@@ -1098,7 +1095,7 @@ class PythonDistributionDelegate(object):
         self.copy_stdinc()
 
         # pypy never uses exec_prefix, just ignore it
-        if sys.exec_prefix != self.prefix and not is_pypy:
+        if sys.exec_prefix != self.prefix() and not is_pypy:
             if sys.platform == 'win32':
                 exec_dir = join(sys.exec_prefix, 'lib')
             elif is_jython:
@@ -1108,19 +1105,7 @@ class PythonDistributionDelegate(object):
             for fn in os.listdir(exec_dir):
                 copyfile(join(exec_dir, fn), join(lib_dir, fn))
 
-        if is_jython:
-            # Jython has either jython-dev.jar and javalib/ dir, or just
-            # jython.jar
-            for name in 'jython-dev.jar', 'javalib', 'jython.jar':
-                src = join(prefix, name)
-                if os.path.exists(src):
-                    copyfile(src, join(home_dir, name))
-            # XXX: registry should always exist after Jython 2.5rc1
-            src = join(prefix, 'registry')
-            if os.path.exists(src):
-                copyfile(src, join(home_dir, 'registry'), symlink=False)
-            copyfile(join(prefix, 'cachedir'), join(home_dir, 'cachedir'),
-                     symlink=False)
+        self.platform_specific()
 
         mkdir(bin_dir)
         py_executable = join(bin_dir, os.path.basename(sys.executable))
@@ -1349,6 +1334,9 @@ class PythonDistributionDelegate(object):
     def install_activate(self):
         install_activate(self._home_dir, self._bin_dir, self._options.prompt)
 
+    def platform_specific(self):
+        pass
+
     def fix_lib64(self):
         """
         Some platforms (particularly Gentoo on x64) put things in lib64/pythonX.Y
@@ -1419,7 +1407,7 @@ class Win32Distribution(PythonDistributionDelegate):
         self._lib_dir = join(home_dir, 'Lib')
         self._inc_dir = join(home_dir, 'Include')
         self._bin_dir = join(home_dir, 'Scripts')
-        self._stdinc_dir = join(self.prefix, 'include')
+        self._stdinc_dir = join(self.prefix(), 'include')
 
     def stdlib_dirs(self):
         stdlib_dirs = [os.path.dirname(os.__file__)]
@@ -1433,13 +1421,29 @@ class JythonDistribution(PythonDistributionDelegate):
         self._inc_dir = join(self._home_dir, 'Include')
         self._bin_dir = join(self._home_dir, 'bin')
 
+    def platform_specific(self):
+        if is_jython:
+            prefix = self.prefix()
+            # Jython has either jython-dev.jar and javalib/ dir, or just
+            # jython.jar
+            for name in 'jython-dev.jar', 'javalib', 'jython.jar':
+                src = join(prefix, name)
+                if os.path.exists(src):
+                    self._fs.copyfile(src, join(home_dir, name))
+            # XXX: registry should always exist after Jython 2.5rc1
+            src = join(prefix, 'registry')
+            if os.path.exists(src):
+                self._fs.copyfile(src, join(home_dir, 'registry'), symlink=False)
+            self._fs.copyfile(join(prefix, 'cachedir'), join(home_dir, 'cachedir'),
+                     symlink=False)
+
 class PyPyDistribution(PythonDistributionDelegate):
 
     def path_locations(self):
         self._lib_dir = home_dir
         self._inc_dir = join(home_dir, 'include')
         self._bin_dir = join(home_dir, 'bin')
-        self._stdinc_dir = join(self.prefix, 'include')
+        self._stdinc_dir = join(self.prefix(), 'include')
 
 class UnixDistribution(PythonDistributionDelegate):
 
@@ -1447,7 +1451,7 @@ class UnixDistribution(PythonDistributionDelegate):
         self._lib_dir = join(self._home_dir, 'lib', py_version)
         self._inc_dir = join(self._home_dir, 'include', py_version + abiflags)
         self._bin_dir = join(self._home_dir, 'bin')
-        self._stdinc_dir = join(self.prefix, 'include', py_version + abiflags)
+        self._stdinc_dir = join(self.prefix(), 'include', py_version + abiflags)
 
     def stdlib_dirs(self):
         stdlib_dirs = [os.path.dirname(os.__file__)]
