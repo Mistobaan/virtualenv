@@ -980,9 +980,13 @@ class PythonDistributionDelegate(object):
         self._home_dir = home_dir
         self._fs = fs
         self._options = options
+        self._ignore_exec_prefix = False
 
     def path_locations(self):
         raise NotImplementedError
+
+    def py_executable(self):
+        return join(self._bin_dir, os.path.basename(sys.executable))
 
     def create(self):
         """
@@ -1063,6 +1067,9 @@ class PythonDistributionDelegate(object):
         else:
             logger.debug('No include dir %s' % self._stdinc_dir)
 
+    def copy_executable(self):
+        pass
+
     def install_python(self):
         """Install just the base environment, no distutils patches etc"""
         home_dir = self._home_dir
@@ -1095,30 +1102,22 @@ class PythonDistributionDelegate(object):
         self.copy_stdinc()
 
         # pypy never uses exec_prefix, just ignore it
-        if sys.exec_prefix != self.prefix() and not is_pypy:
-            if sys.platform == 'win32':
-                exec_dir = join(sys.exec_prefix, 'lib')
-            elif is_jython:
-                exec_dir = join(sys.exec_prefix, 'Lib')
-            else:
-                exec_dir = join(sys.exec_prefix, 'lib', py_version)
-            for fn in os.listdir(exec_dir):
-                copyfile(join(exec_dir, fn), join(lib_dir, fn))
+        if not self._ignore_exec_prefix:
+            if sys.exec_prefix != self.prefix():
+                for fn in os.listdir(self._exec_dir):
+                    self._fs.copyfile(join(self._exec_dir, fn),
+                                      join(self._lib_dir, fn))
 
         self.platform_specific()
 
-        mkdir(bin_dir)
-        py_executable = join(bin_dir, os.path.basename(sys.executable))
-        if 'Python.framework' in prefix:
-            if re.search(r'/Python(?:-32|-64)*$', py_executable):
-                # The name of the python executable is not quite what
-                # we want, rename it.
-                py_executable = os.path.join(
-                        os.path.dirname(py_executable), 'python')
+        # Bin exec
+        self._fs.mkdir(bin_dir)
+        py_executable = self.py_executable()
 
         logger.notify('New %s executable in %s', expected_exe, py_executable)
         pcbuild_dir = os.path.dirname(sys.executable)
         pyd_pth = os.path.join(lib_dir, 'site-packages', 'virtualenv_builddir_pyd.pth')
+
         if is_win and os.path.exists(os.path.join(pcbuild_dir, 'build.bat')):
             logger.notify('Detected python running from build directory %s', pcbuild_dir)
             logger.notify('Writing .pth file linking to build directory for *.pyd files')
@@ -1139,50 +1138,8 @@ class PythonDistributionDelegate(object):
                 logger.info('Executable actually exists in %s' % executable)
             shutil.copyfile(executable, py_executable)
             make_exe(py_executable)
-            if sys.platform == 'win32' or sys.platform == 'cygwin':
-                pythonw = os.path.join(os.path.dirname(sys.executable), 'pythonw.exe')
-                if os.path.exists(pythonw):
-                    logger.info('Also created pythonw.exe')
-                    shutil.copyfile(pythonw, os.path.join(os.path.dirname(py_executable), 'pythonw.exe'))
-                python_d = os.path.join(os.path.dirname(sys.executable), 'python_d.exe')
-                python_d_dest = os.path.join(os.path.dirname(py_executable), 'python_d.exe')
-                if os.path.exists(python_d):
-                    logger.info('Also created python_d.exe')
-                    shutil.copyfile(python_d, python_d_dest)
-                elif os.path.exists(python_d_dest):
-                    logger.info('Removed python_d.exe as it is no longer at the source')
-                    os.unlink(python_d_dest)
-                # we need to copy the DLL to enforce that windows will load the correct one.
-                # may not exist if we are cygwin.
-                py_executable_dll = 'python%s%s.dll' % (
-                    sys.version_info[0], sys.version_info[1])
-                py_executable_dll_d = 'python%s%s_d.dll' % (
-                    sys.version_info[0], sys.version_info[1])
-                pythondll = os.path.join(os.path.dirname(sys.executable), py_executable_dll)
-                pythondll_d = os.path.join(os.path.dirname(sys.executable), py_executable_dll_d)
-                pythondll_d_dest = os.path.join(os.path.dirname(py_executable), py_executable_dll_d)
-                if os.path.exists(pythondll):
-                    logger.info('Also created %s' % py_executable_dll)
-                    shutil.copyfile(pythondll, os.path.join(os.path.dirname(py_executable), py_executable_dll))
-                if os.path.exists(pythondll_d):
-                    logger.info('Also created %s' % py_executable_dll_d)
-                    shutil.copyfile(pythondll_d, pythondll_d_dest)
-                elif os.path.exists(pythondll_d_dest):
-                    logger.info('Removed %s as the source does not exist' % pythondll_d_dest)
-                    os.unlink(pythondll_d_dest)
-            if is_pypy:
-                # make a symlink python --> pypy-c
-                python_executable = os.path.join(os.path.dirname(py_executable), 'python')
-                if sys.platform in ('win32', 'cygwin'):
-                    python_executable += '.exe'
-                logger.info('Also created executable %s' % python_executable)
-                copyfile(py_executable, python_executable)
 
-                if sys.platform == 'win32':
-                    for name in 'libexpat.dll', 'libpypy.dll', 'libpypy-c.dll', 'libeay32.dll', 'ssleay32.dll', 'sqlite.dll':
-                        src = join(prefix, name)
-                        if os.path.exists(src):
-                            copyfile(src, join(bin_dir, name))
+            self.copy_executable()
 
         if os.path.splitext(os.path.basename(py_executable))[0] != expected_exe:
             secondary_exe = os.path.join(os.path.dirname(py_executable),
@@ -1199,65 +1156,12 @@ class PythonDistributionDelegate(object):
                 shutil.copyfile(sys.executable, secondary_exe)
                 make_exe(secondary_exe)
 
-        if '.framework' in prefix:
-            if 'Python.framework' in prefix:
-                logger.debug('MacOSX Python framework detected')
-                # Make sure we use the the embedded interpreter inside
-                # the framework, even if sys.executable points to
-                # the stub executable in ${sys.prefix}/bin
-                # See http://groups.google.com/group/python-virtualenv/
-                #                              browse_thread/thread/17cab2f85da75951
-                original_python = os.path.join(
-                    prefix, 'Resources/Python.app/Contents/MacOS/Python')
-            if 'EPD' in prefix:
-                logger.debug('EPD framework detected')
-                original_python = os.path.join(prefix, 'bin/python')
-            shutil.copy(original_python, py_executable)
-
-            # Copy the framework's dylib into the virtual
-            # environment
-            virtual_lib = os.path.join(home_dir, '.Python')
-
-            if os.path.exists(virtual_lib):
-                os.unlink(virtual_lib)
-            copyfile(
-                os.path.join(prefix, 'Python'),
-                virtual_lib)
-
-            # And then change the install_name of the copied python executable
-            try:
-                call_subprocess(
-                    ["install_name_tool", "-change",
-                     os.path.join(prefix, 'Python'),
-                     '@executable_path/../.Python',
-                     py_executable])
-            except:
-                logger.fatal(
-                    "Could not call install_name_tool -- you must have Apple's development tools installed")
-                raise
-
-            # Some tools depend on pythonX.Y being present
-            py_executable_version = '%s.%s' % (
-                sys.version_info[0], sys.version_info[1])
-            if not py_executable.endswith(py_executable_version):
-                # symlinking pythonX.Y > python
-                pth = py_executable + '%s.%s' % (
-                        sys.version_info[0], sys.version_info[1])
-                if os.path.exists(pth):
-                    os.unlink(pth)
-                os.symlink('python', pth)
-            else:
-                # reverse symlinking python -> pythonX.Y (with --python)
-                pth = join(bin_dir, 'python')
-                if os.path.exists(pth):
-                    os.unlink(pth)
-                os.symlink(os.path.basename(py_executable), pth)
-
         if sys.platform == 'win32' and ' ' in py_executable:
             # There's a bug with subprocess on Windows when using a first
             # argument that has a space in it.  Instead we have to quote
             # the value:
             py_executable = '"%s"' % py_executable
+
         # NOTE: keep this check as one line, cmd.exe doesn't cope with line breaks
         cmd = [py_executable, '-c', 'import sys;out=sys.stdout;'
             'getattr(out, "buffer", out).write(sys.prefix.encode("utf-8"))']
@@ -1408,11 +1312,49 @@ class Win32Distribution(PythonDistributionDelegate):
         self._inc_dir = join(home_dir, 'Include')
         self._bin_dir = join(home_dir, 'Scripts')
         self._stdinc_dir = join(self.prefix(), 'include')
+        self._exec_dir = join(sys.exec_prefix, 'lib')
 
     def stdlib_dirs(self):
         stdlib_dirs = [os.path.dirname(os.__file__)]
         stdlib_dirs.append(join(os.path.dirname(stdlib_dirs[0]), 'DLLs'))
         return stdlib_dirs
+
+    def copy_executable(self):
+        if sys.platform == 'win32' or sys.platform == 'cygwin':
+            pythonw = os.path.join(os.path.dirname(sys.executable), 'pythonw.exe')
+            if os.path.exists(pythonw):
+                logger.info('Also created pythonw.exe')
+                shutil.copyfile(pythonw, os.path.join(os.path.dirname(py_executable), 'pythonw.exe'))
+            python_d = os.path.join(os.path.dirname(sys.executable), 'python_d.exe')
+            python_d_dest = os.path.join(os.path.dirname(py_executable), 'python_d.exe')
+            if os.path.exists(python_d):
+                logger.info('Also created python_d.exe')
+                shutil.copyfile(python_d, python_d_dest)
+            elif os.path.exists(python_d_dest):
+                logger.info('Removed python_d.exe as it is no longer at the source')
+                os.unlink(python_d_dest)
+            # we need to copy the DLL to enforce that windows will load the correct one.
+            # may not exist if we are cygwin.
+            py_executable_dll = 'python%s%s.dll' % (
+                sys.version_info[0], sys.version_info[1])
+            py_executable_dll_d = 'python%s%s_d.dll' % (
+                sys.version_info[0], sys.version_info[1])
+            pythondll = os.path.join(os.path.dirname(sys.executable), py_executable_dll)
+            pythondll_d = os.path.join(os.path.dirname(sys.executable), py_executable_dll_d)
+            pythondll_d_dest = os.path.join(os.path.dirname(py_executable), py_executable_dll_d)
+            if os.path.exists(pythondll):
+                logger.info('Also created %s' % py_executable_dll)
+                shutil.copyfile(pythondll, os.path.join(os.path.dirname(py_executable), py_executable_dll))
+            if os.path.exists(pythondll_d):
+                logger.info('Also created %s' % py_executable_dll_d)
+                shutil.copyfile(pythondll_d, pythondll_d_dest)
+            elif os.path.exists(pythondll_d_dest):
+                logger.info('Removed %s as the source does not exist' % pythondll_d_dest)
+                os.unlink(pythondll_d_dest)
+
+    def platform_specific(self):
+        pass
+
 
 class JythonDistribution(PythonDistributionDelegate):
 
@@ -1420,6 +1362,7 @@ class JythonDistribution(PythonDistributionDelegate):
         self._lib_dir = join(self._home_dir, 'Lib')
         self._inc_dir = join(self._home_dir, 'Include')
         self._bin_dir = join(self._home_dir, 'bin')
+        self._exec_dir = join(sys.exec_prefix, 'Lib')
 
     def platform_specific(self):
         if is_jython:
@@ -1439,11 +1382,30 @@ class JythonDistribution(PythonDistributionDelegate):
 
 class PyPyDistribution(PythonDistributionDelegate):
 
+    def __init__(self, *args, **kwds):
+        super(PyPyDistribution, self).__init__(*args, **kwds)
+        self._ignore_exec_prefix = True
+
     def path_locations(self):
         self._lib_dir = home_dir
         self._inc_dir = join(home_dir, 'include')
         self._bin_dir = join(home_dir, 'bin')
         self._stdinc_dir = join(self.prefix(), 'include')
+
+    def copy_executable(self):
+        # make a symlink python --> pypy-c
+        python_executable = os.path.join(os.path.dirname(py_executable), 'python')
+        if sys.platform in ('win32', 'cygwin'):
+            python_executable += '.exe'
+        logger.info('Also created executable %s' % python_executable)
+        copyfile(py_executable, python_executable)
+
+        if sys.platform == 'win32':
+            for name in 'libexpat.dll', 'libpypy.dll', 'libpypy-c.dll', 'libeay32.dll', 'ssleay32.dll', 'sqlite.dll':
+                src = join(prefix, name)
+                if os.path.exists(src):
+                    copyfile(src, join(bin_dir, name))
+
 
 class UnixDistribution(PythonDistributionDelegate):
 
@@ -1452,6 +1414,7 @@ class UnixDistribution(PythonDistributionDelegate):
         self._inc_dir = join(self._home_dir, 'include', py_version + abiflags)
         self._bin_dir = join(self._home_dir, 'bin')
         self._stdinc_dir = join(self.prefix(), 'include', py_version + abiflags)
+        self._exec_dir = join(sys.exec_prefix, 'lib', py_version)
 
     def stdlib_dirs(self):
         stdlib_dirs = [os.path.dirname(os.__file__)]
@@ -1463,6 +1426,71 @@ class DarwinDistribution(PythonDistributionDelegate):
         stdlibs = super(DarwinDistrubtion, self).stdlibs()
         stdlib_dirs.append(join(stdlib_dirs[0], 'site-packages'))
         return stdlibs
+
+    def py_executable(self):
+        py_executable = super(DarwinDistribution, self).py_executable()
+        if 'Python.framework' in self.prefix():
+            if re.search(r'/Python(?:-32|-64)*$', py_executable):
+                # The name of the python executable is not quite what
+                # we want, rename it.
+                py_executable = os.path.join(
+                        os.path.dirname(py_executable), 'python')
+        return py_executable
+
+    def platform_specific(self):
+        if '.framework' in prefix:
+            if 'Python.framework' in prefix:
+                logger.debug('MacOSX Python framework detected')
+                # Make sure we use the the embedded interpreter inside
+                # the framework, even if sys.executable points to
+                # the stub executable in ${sys.prefix}/bin
+                # See http://groups.google.com/group/python-virtualenv/
+                #                              browse_thread/thread/17cab2f85da75951
+                original_python = os.path.join(
+                    prefix, 'Resources/Python.app/Contents/MacOS/Python')
+            if 'EPD' in prefix:
+                logger.debug('EPD framework detected')
+                original_python = os.path.join(prefix, 'bin/python')
+            shutil.copy(original_python, py_executable)
+
+            # Copy the framework's dylib into the virtual
+            # environment
+            virtual_lib = os.path.join(home_dir, '.Python')
+
+            if os.path.exists(virtual_lib):
+                os.unlink(virtual_lib)
+            copyfile(
+                os.path.join(prefix, 'Python'),
+                virtual_lib)
+
+            # And then change the install_name of the copied python executable
+            try:
+                call_subprocess(
+                    ["install_name_tool", "-change",
+                     os.path.join(prefix, 'Python'),
+                     '@executable_path/../.Python',
+                     py_executable])
+            except:
+                logger.fatal(
+                    "Could not call install_name_tool -- you must have Apple's development tools installed")
+                raise
+
+            # Some tools depend on pythonX.Y being present
+            py_executable_version = '%s.%s' % (
+                sys.version_info[0], sys.version_info[1])
+            if not py_executable.endswith(py_executable_version):
+                # symlinking pythonX.Y > python
+                pth = py_executable + '%s.%s' % (
+                        sys.version_info[0], sys.version_info[1])
+                if os.path.exists(pth):
+                    os.unlink(pth)
+                os.symlink('python', pth)
+            else:
+                # reverse symlinking python -> pythonX.Y (with --python)
+                pth = join(bin_dir, 'python')
+                if os.path.exists(pth):
+                    os.unlink(pth)
+                os.symlink(os.path.basename(py_executable), pth)
 
 def call_subprocess(cmd, show_stdout=True,
                     filter_stdout=None, cwd=None,
