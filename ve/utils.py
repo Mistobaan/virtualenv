@@ -1,8 +1,17 @@
 import os
 import sys
 from ve import *
+from ve.log import logger
+
 
 join = os.path.join
+
+def _find_file(filename, dirs):
+    for dir in reversed(dirs):
+        if os.path.exists(join(dir, filename)):
+            return join(dir, filename)
+    return filename
+
 
 def change_prefix(filename, dst_prefix):
     prefixes = [sys.prefix]
@@ -30,7 +39,8 @@ def change_prefix(filename, dst_prefix):
 def call_subprocess(cmd, show_stdout=True,
                     filter_stdout=None, cwd=None,
                     raise_on_returncode=True, extra_env=None,
-                    remove_from_env=None):
+                    remove_from_env=None,
+                    capture_stdout=True):
     cmd_parts = []
     for part in cmd:
         if len(part) > 45:
@@ -44,10 +54,9 @@ def call_subprocess(cmd, show_stdout=True,
                 part = part.decode(sys.getfilesystemencoding())
         cmd_parts.append(part)
     cmd_desc = ' '.join(cmd_parts)
-    if show_stdout:
-        stdout = None
-    else:
+    if capture_stdout:
         stdout = subprocess.PIPE
+
     logger.debug("Running command %s" % cmd_desc)
     if extra_env or remove_from_env:
         env = os.environ.copy()
@@ -64,15 +73,20 @@ def call_subprocess(cmd, show_stdout=True,
             cwd=cwd, env=env)
     except Exception:
         e = sys.exc_info()[1]
-        logger.fatal(
-            "Error %s while executing command %s" % (e, cmd_desc))
-        raise
+
+        if e.errno == errno.EACCES:
+            logger.fatal('ERROR: The executable %s could not be run: %s' % (py_executable, e))
+            sys.exit(100)
+        else:
+            logger.fatal("Error %s while executing command %s" % (e, cmd_desc))
+            raise e
+
     all_output = []
-    if stdout is not None:
+    if capture_stdout is not None:
         stdout = proc.stdout
         encoding = sys.getdefaultencoding()
         fs_encoding = sys.getfilesystemencoding()
-        while 1:
+        while True:
             line = stdout.readline()
             try:
                 line = line.decode(encoding)
@@ -106,3 +120,18 @@ def call_subprocess(cmd, show_stdout=True,
             logger.warn(
                 "Command %s had error code %s"
                 % (cmd_desc, proc.returncode))
+    return all_output
+
+def file_search_dirs():
+    here = os.path.dirname(os.path.abspath(__file__))
+    dirs = ['.', here,
+            join(here, 'virtualenv_support')]
+    if os.path.splitext(os.path.dirname(__file__))[0] != 'virtualenv':
+        # Probably some boot script; just in case virtualenv is installed...
+        try:
+            import virtualenv
+        except ImportError:
+            pass
+        else:
+            dirs.append(os.path.join(os.path.dirname(virtualenv.__file__), 'virtualenv_support'))
+    return [d for d in dirs if os.path.isdir(d)]

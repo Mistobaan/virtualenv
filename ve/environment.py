@@ -1,7 +1,86 @@
-from ve.utils import *
-from ve.log import logger
 import ve
 import distutils
+from ve.utils import *
+from ve.utils import _find_file
+from ve.log import logger, Logger
+
+def _filter_ez_setup(line, project_name='setuptools'):
+    if not line.strip():
+        return Logger.DEBUG
+    if project_name == 'distribute':
+        for prefix in ('Extracting', 'Now working', 'Installing', 'Before',
+                       'Scanning', 'Setuptools', 'Egg', 'Already',
+                       'running', 'writing', 'reading', 'installing',
+                       'creating', 'copying', 'byte-compiling', 'removing',
+                       'Processing'):
+            if line.startswith(prefix):
+                return Logger.DEBUG
+        return Logger.DEBUG
+    for prefix in ['Reading ', 'Best match', 'Processing setuptools',
+                   'Copying setuptools', 'Adding setuptools',
+                   'Installing ', 'Installed ']:
+        if line.startswith(prefix):
+            return Logger.DEBUG
+    return Logger.INFO
+
+def install_distribute(py_executable, unzip=False,
+                       search_dirs=None, never_download=False):
+    _install_req(py_executable, unzip, distribute=True,
+                 search_dirs=search_dirs, never_download=never_download)
+
+_pip_re = re.compile(r'^pip-.*(zip|tar.gz|tar.bz2|tgz|tbz)$', re.I)
+def install_pip(py_executable, search_dirs=None, never_download=False):
+    if search_dirs is None:
+        search_dirs = file_search_dirs()
+
+    filenames = []
+    for dir in search_dirs:
+        filenames.extend([join(dir, fn) for fn in os.listdir(dir)
+                          if _pip_re.search(fn)])
+    filenames = [(os.path.basename(filename).lower(), i, filename) for i, filename in enumerate(filenames)]
+    filenames.sort()
+    filenames = [filename for basename, i, filename in filenames]
+    if not filenames:
+        filename = 'pip'
+    else:
+        filename = filenames[-1]
+    easy_install_script = 'easy_install'
+    if sys.platform == 'win32':
+        easy_install_script = 'easy_install-script.py'
+    # There's two subtle issues here when invoking easy_install.
+    # 1. On unix-like systems the easy_install script can *only* be executed
+    #    directly if its full filesystem path is no longer than 78 characters.
+    # 2. A work around to [1] is to use the `python path/to/easy_install foo`
+    #    pattern, but that breaks if the path contains non-ASCII characters, as
+    #    you can't put the file encoding declaration before the shebang line.
+    # The solution is to use Python's -x flag to skip the first line of the
+    # script (and any ASCII decoding errors that may have occurred in that line)
+    cmd = [py_executable, '-x', join(os.path.dirname(py_executable), easy_install_script), filename]
+    # jython and pypy don't yet support -x
+    if is_jython or is_pypy:
+        cmd.remove('-x')
+    if filename == 'pip':
+        if never_download:
+            logger.fatal("Can't find any local distributions of pip to install "
+                         "and --never-download is set.  Either re-run virtualenv "
+                         "without the --never-download option, or place a pip "
+                         "source distribution (zip/tar.gz/tar.bz2) in one of these "
+                         "locations: %r" % search_dirs)
+            sys.exit(1)
+        logger.info('Installing pip from network...')
+    else:
+        logger.info('Installing existing %s distribution: %s' % (
+                os.path.basename(filename), filename))
+    logger.start_progress('Installing pip...')
+    logger.indent += 2
+    def _filter_setup(line):
+        return _filter_ez_setup(line, 'pip')
+    try:
+        call_subprocess(cmd, show_stdout=False,
+                        filter_stdout=_filter_setup)
+    finally:
+        logger.indent -= 2
+        logger.end_progress()
 
 
 class BasePythonDistribution(object):
@@ -166,9 +245,13 @@ class BasePythonDistribution(object):
                 executable += '.exe'
                 py_executable += '.exe'
                 logger.info('Executable actually exists in %s' % executable)
-            self._fs.copyfile(executable, py_executable)
-            self._fs.make_exe(py_executable)
 
+            executable = self._fs.resolve_link(executable)
+            logger.info("Reference Python Executable: %s", executable)
+            # For the way CPython's prefix loads we can't use symlinks for the executable
+            # http://svn.python.org/projects/python/trunk/Modules/getpath.c
+            self._fs.copyfile(executable, py_executable, symlink=False)
+            self._fs.make_exe(py_executable)
             self.copy_executable()
 
         if os.path.splitext(os.path.basename(py_executable))[0] != expected_exe:
@@ -183,8 +266,9 @@ class BasePythonDistribution(object):
                             % (expected_exe, secondary_exe, py_executable))
             else:
                 logger.notify('Also creating executable in %s' % secondary_exe)
-                self._fs.copyfile(sys.executable, secondary_exe)
-                make_exe(secondary_exe)
+                
+                self._fs.copyfile(sys.executable, secondary_exe, symlink=False)
+                self._fs.make_exe(secondary_exe)
 
         if sys.platform == 'win32' and ' ' in py_executable:
             # There's a bug with subprocess on Windows when using a first
@@ -193,26 +277,18 @@ class BasePythonDistribution(object):
             py_executable = '"%s"' % py_executable
 
         # NOTE: keep this check as one line, cmd.exe doesn't cope with line breaks
-        cmd = [py_executable, '-c', 'import sys;out=sys.stdout;'
-            'getattr(out, "buffer", out).write(sys.prefix.encode("utf-8"))']
+        cmd = [py_executable, '-c', 'import sys;import os;out=sys.stdout;'
+            'getattr(out, "buffer", out).write(os.path.abspath(sys.prefix.encode("utf-8")))']
         logger.info('Testing executable with %s %s "%s"' % tuple(cmd))
-        try:
-            proc = subprocess.Popen(cmd,
-                                stdout=subprocess.PIPE)
-            proc_stdout, proc_stderr = proc.communicate()
-        except OSError:
-            e = sys.exc_info()[1]
-            if e.errno == errno.EACCES:
-                logger.fatal('ERROR: The executable %s could not be run: %s' % (py_executable, e))
-                sys.exit(100)
-            else:
-              raise e
 
-        proc_stdout = proc_stdout.strip().decode("utf-8")
+        proc_stdout = call_subprocess(cmd)[0]
+
         proc_stdout = os.path.normcase(os.path.abspath(proc_stdout))
         norm_home_dir = os.path.normcase(os.path.abspath(home_dir))
+
         if hasattr(norm_home_dir, 'decode'):
             norm_home_dir = norm_home_dir.decode(sys.getfilesystemencoding())
+
         if proc_stdout != norm_home_dir:
             logger.fatal(
                 'ERROR: The executable %s is not functioning' % py_executable)
@@ -237,8 +313,7 @@ class BasePythonDistribution(object):
             logger.notify('Please make sure you remove any previous custom paths from '
                           'your %s file.' % pydistutils)
         ## FIXME: really this should be calculated earlier
-
-        fix_local_scheme(home_dir)
+        self.fix_local_scheme()
 
         return py_executable
 
@@ -256,9 +331,15 @@ class BasePythonDistribution(object):
                            never_download=self._options.never_download)
 
     def install_setuptools(self):
-        install_setuptools(self._py_executable, unzip=self._options.unzip_setuptools,
-                           search_dirs=self._options.search_dirs,
-                           never_download=self._options.never_download)
+        self._py_executable,
+        unzip=self._options.unzip_setuptools
+        search_dirs=self._options.search_dirs
+        never_download=self._options.never_download
+
+        self._install_req(self._py_executable,
+                          unzip,
+                          search_dirs,
+                          never_download=never_download)
 
     def install_pip(self):
         install_pip(self._py_executable,
@@ -266,7 +347,45 @@ class BasePythonDistribution(object):
                     never_download=self._options.never_download)
 
     def install_activate(self):
-        install_activate(self._home_dir, self._bin_dir, self._options.prompt)
+        home_dir = os.path.abspath(self._home_dir)
+        prompt=self._options.prompt
+        if sys.platform == 'win32' or is_jython and os._name == 'nt':
+            files = {
+                'activate.bat': ACTIVATE_BAT,
+                'deactivate.bat': DEACTIVATE_BAT,
+                'activate.ps1': ACTIVATE_PS,
+            }
+
+            # MSYS needs paths of the form /c/path/to/file
+            drive, tail = os.path.splitdrive(home_dir.replace(os.sep, '/'))
+            home_dir_msys = (drive and "/%s%s" or "%s%s") % (drive[:1], tail)
+
+            # Run-time conditional enables (basic) Cygwin compatibility
+            home_dir_sh = ("""$(if [ "$OSTYPE" "==" "cygwin" ]; then cygpath -u '%s'; else echo '%s'; fi;)""" %
+                           (home_dir, home_dir_msys))
+            files['activate'] = ACTIVATE_SH.replace('__VIRTUAL_ENV__', home_dir_sh)
+
+        else:
+            files = {'activate': ACTIVATE_SH}
+
+            # suppling activate.fish in addition to, not instead of, the
+            # bash script support.
+            files['activate.fish'] = ACTIVATE_FISH
+
+            # same for csh/tcsh support...
+            files['activate.csh'] = ACTIVATE_CSH
+
+        files['activate_this.py'] = ACTIVATE_THIS
+        if hasattr(home_dir, 'decode'):
+            home_dir = home_dir.decode(sys.getfilesystemencoding())
+        vname = os.path.basename(home_dir)
+        for name, content in files.items():
+            content = content.replace('__VIRTUAL_PROMPT__', prompt or '')
+            content = content.replace('__VIRTUAL_WINPROMPT__', prompt or '(%s)' % vname)
+            content = content.replace('__VIRTUAL_ENV__', home_dir)
+            content = content.replace('__VIRTUAL_NAME__', vname)
+            content = content.replace('__BIN_NAME__', os.path.basename(self._bin_dir))
+            self._fs.writefile(os.path.join(self._bin_dir, name), content)
 
     def platform_specific(self):
         pass
@@ -343,3 +462,110 @@ class BasePythonDistribution(object):
                             self._fs.copyfile(pyfile, dst_filename[:-1])
         finally:
             sys.path = _prev_sys_path
+
+    def _install_req(self, py_executable, unzip=False, distribute=False,
+                     search_dirs=None, never_download=False):
+
+        if search_dirs is None:
+            search_dirs = file_search_dirs()
+
+        if not distribute:
+            setup_fn = 'setuptools-0.6c11-py%s.egg' % sys.version[:3]
+            project_name = 'setuptools'
+            bootstrap_script = EZ_SETUP_PY
+            source = None
+        else:
+            setup_fn = None
+            source = 'distribute-0.6.24.tar.gz'
+            project_name = 'distribute'
+            bootstrap_script = DISTRIBUTE_SETUP_PY
+
+        if setup_fn is not None:
+            setup_fn = _find_file(setup_fn, search_dirs)
+
+        if source is not None:
+            source = _find_file(source, search_dirs)
+
+        if is_jython and os._name == 'nt':
+            # Jython's .bat sys.executable can't handle a command line
+            # argument with newlines
+            fd, ez_setup = tempfile.mkstemp('.py')
+            os.write(fd, bootstrap_script)
+            os.close(fd)
+            cmd = [py_executable, ez_setup]
+        else:
+            cmd = [py_executable, '-c', bootstrap_script]
+        if unzip:
+            cmd.append('--always-unzip')
+        env = {}
+        remove_from_env = []
+        if logger.stdout_level_matches(logger.DEBUG):
+            cmd.append('-v')
+
+        old_chdir = os.getcwd()
+        if setup_fn is not None and os.path.exists(setup_fn):
+            logger.info('Using existing %s egg: %s' % (project_name, setup_fn))
+            cmd.append(setup_fn)
+            if os.environ.get('PYTHONPATH'):
+                env['PYTHONPATH'] = setup_fn + os.path.pathsep + os.environ['PYTHONPATH']
+            else:
+                env['PYTHONPATH'] = setup_fn
+        else:
+            # the source is found, let's chdir
+            if source is not None and os.path.exists(source):
+                logger.info('Using existing %s egg: %s' % (project_name, source))
+                os.chdir(os.path.dirname(source))
+                # in this case, we want to be sure that PYTHONPATH is unset (not
+                # just empty, really unset), else CPython tries to import the
+                # site.py that it's in virtualenv_support
+                remove_from_env.append('PYTHONPATH')
+            else:
+                if never_download:
+                    logger.fatal("Can't find any local distributions of %s to install "
+                                 "and --never-download is set.  Either re-run virtualenv "
+                                 "without the --never-download option, or place a %s "
+                                 "distribution (%s) in one of these "
+                                 "locations: %r" % (project_name, project_name,
+                                                    setup_fn or source,
+                                                    search_dirs))
+                    sys.exit(1)
+
+                logger.info('No %s egg found; downloading' % project_name)
+            cmd.extend(['--always-copy', '-U', project_name])
+        logger.start_progress('Installing %s...' % project_name)
+        logger.indent += 2
+        cwd = None
+        if project_name == 'distribute':
+            env['DONT_PATCH_SETUPTOOLS'] = 'true'
+
+        if not os.access(os.getcwd(), os.W_OK):
+            cwd = tempfile.mkdtemp()
+            if source is not None and os.path.exists(source):
+                # the current working dir is hostile, let's copy the
+                # tarball to a temp dir
+                target = os.path.join(cwd, os.path.split(source)[-1])
+                shutil.copy(source, target)
+        try:
+            call_subprocess(cmd, show_stdout=False,
+                            filter_stdout=_filter_ez_setup,
+                            extra_env=env,
+                            remove_from_env=remove_from_env,
+                            cwd=cwd)
+        finally:
+            logger.indent -= 2
+            logger.end_progress()
+            if os.getcwd() != old_chdir:
+                os.chdir(old_chdir)
+            if is_jython and os._name == 'nt':
+                os.remove(ez_setup)
+
+    def install_distutils(self):
+        distutils_path = change_prefix(distutils.__path__[0], self._home_dir)
+        self._fs.mkdir(distutils_path)
+        ## FIXME: maybe this prefix setting should only be put in place if
+        ## there's a local distutils.cfg with a prefix setting?
+        ## FIXME: this is breaking things, removing for now:
+        #home_dir = os.path.abspath(self._home_dir)
+        #distutils_cfg = DISTUTILS_CFG + "\n[install]\nprefix=%s\n" % home_dir
+        self._fs.writefile(join(distutils_path, '__init__.py'), DISTUTILS_INIT)
+        self._fs.writefile(join(distutils_path, 'distutils.cfg'), DISTUTILS_CFG, overwrite=False)

@@ -19,10 +19,13 @@ class Logger(object):
     LEVELS = [DEBUG, INFO, NOTIFY, WARN, ERROR, FATAL]
 
     def __init__(self, consumers):
+        self.init(consumers)
+
+    def init(self, consumers):
         self.consumers = consumers
         self.indent = 0
         self.in_progress = None
-        self.in_progress_hanging = False
+        self.in_progress_hanging = False        
 
     def debug(self, msg, *args, **kw):
         self.log(self.DEBUG, msg, *args, **kw)

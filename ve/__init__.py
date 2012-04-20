@@ -1,5 +1,39 @@
+import base64
 import sys
 import os
+import optparse
+import re
+import shutil
+import logging
+import tempfile
+import zlib
+import errno
+
+from distutils.util import strtobool
+
+try:
+    import subprocess
+except ImportError:
+    if sys.version_info <= (2, 3):
+        print('ERROR: %s' % sys.exc_info()[1])
+        print('ERROR: this script requires Python 2.4 or greater; or at least the subprocess module.')
+        print('If you copy subprocess.py from a newer version of Python this script will probably work')
+        sys.exit(101)
+    else:
+        raise
+try:
+    set
+except NameError:
+    from sets import Set as set
+try:
+    basestring
+except NameError:
+    basestring = str
+
+try:
+    import ConfigParser
+except ImportError:
+    import configparser as ConfigParser
 
 import distutils.sysconfig
 import distutils
