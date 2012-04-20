@@ -48,7 +48,7 @@ py_version = 'python%s.%s' % (sys.version_info[0], sys.version_info[1])
 
 is_jython = sys.platform.startswith('java')
 is_pypy = hasattr(sys, 'pypy_version_info')
-is_win  = (sys.platform == 'win32')
+is_win = (sys.platform == 'win32')
 abiflags = getattr(sys, 'abiflags', '')
 
 user_dir = os.path.expanduser('~')
@@ -258,7 +258,7 @@ class Logger(object):
 
     DEBUG = logging.DEBUG
     INFO = logging.INFO
-    NOTIFY = (logging.INFO+logging.WARN)/2
+    NOTIFY = (logging.INFO + logging.WARN) / 2
     WARN = WARNING = logging.WARN
     ERROR = logging.ERROR
     FATAL = logging.FATAL
@@ -302,9 +302,9 @@ class Logger(object):
                         rendered = msg % args
                     else:
                         rendered = msg
-                    rendered = ' '*self.indent + rendered
+                    rendered = ' ' * self.indent + rendered
                 if hasattr(consumer, 'write'):
-                    consumer.write(rendered+'\n')
+                    consumer.write(rendered + '\n')
                 else:
                     consumer(rendered)
 
@@ -840,6 +840,12 @@ def main():
         help='Use Distribute instead of Setuptools. Set environ variable '
         'VIRTUALENV_DISTRIBUTE to make it the default ')
 
+    parser.add_option(
+        '--experimental',
+        dest='experimental',
+        action='store_true',
+        help='Use the new class base virtualenv generator')
+
     default_search_dirs = file_search_dirs()
     parser.add_option(
         '--extra-search-dir',
@@ -872,7 +878,7 @@ def main():
         adjust_options(options, args)
 
     verbosity = options.verbose - options.quiet
-    logger = Logger([(Logger.level_for_integer(2-verbosity), sys.stdout)])
+    logger = Logger([(Logger.level_for_integer(2 - verbosity), sys.stdout)])
 
     if options.python and not os.environ.get('VIRTUALENV_INTERPRETER_RUNNING'):
         env = os.environ.copy()
@@ -927,7 +933,11 @@ def main():
         logger.warn('The --no-site-packages flag is deprecated; it is now '
                     'the default behavior.')
 
-    create_environment(home_dir,
+    if options.experimental:
+        env = EnvironmentBuilder(home, options)
+        env.create()
+    else:
+        create_environment(home_dir,
                        site_packages=options.system_site_packages,
                        clear=options.clear,
                        unzip_setuptools=options.unzip_setuptools,
@@ -935,8 +945,27 @@ def main():
                        prompt=options.prompt,
                        search_dirs=options.search_dirs,
                        never_download=options.never_download)
+
+
     if 'after_install' in globals():
         after_install(options, home_dir)
+
+class EnvironmentBuilder(object):
+
+    def __init__(self, home_dir, options):
+        self._home_dir = home_dir
+        self._options = options
+
+    def create(self):
+        options = self._options
+        create_environment(self._home_dir,
+                       site_packages=options.system_site_packages,
+                       clear=options.clear,
+                       unzip_setuptools=options.unzip_setuptools,
+                       use_distribute=options.use_distribute,
+                       prompt=options.prompt,
+                       search_dirs=options.search_dirs,
+                       never_download=options.never_download)
 
 def call_subprocess(cmd, show_stdout=True,
                     filter_stdout=None, cwd=None,
@@ -945,7 +974,7 @@ def call_subprocess(cmd, show_stdout=True,
     cmd_parts = []
     for part in cmd:
         if len(part) > 45:
-            part = part[:20]+"..."+part[-20:]
+            part = part[:20] + "..." + part[-20:]
         if ' ' in part or '\n' in part or '"' in part or "'" in part:
             part = '"%s"' % part.replace('"', '\\"')
         if hasattr(part, 'decode'):
@@ -1609,7 +1638,7 @@ def fixup_scripts(home_dir):
                             % (filename, shebang))
             continue
         logger.notify('Making script %s relative' % filename)
-        lines = [new_shebang+'\n', activate+'\n'] + lines[1:]
+        lines = [new_shebang + '\n', activate + '\n'] + lines[1:]
         f = open(filename, 'wb')
         f.write('\n'.join(lines).encode('utf-8'))
         f.close()
@@ -1703,7 +1732,7 @@ def make_relative_path(source, dest, dest_is_directory=True):
     while dest_parts and source_parts and dest_parts[0] == source_parts[0]:
         dest_parts.pop(0)
         source_parts.pop(0)
-    full_parts = ['..']*len(source_parts) + dest_parts
+    full_parts = ['..'] * len(source_parts) + dest_parts
     if not dest_is_directory:
         full_parts.append(dest_filename)
     if not full_parts:
