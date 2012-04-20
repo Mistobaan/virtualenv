@@ -997,24 +997,39 @@ class PythonDistributionDelegate(object):
         # home_dir, lib_dir, inc_dir, bin_dir = path_locations(home_dir)
         self.path_locations()
 
-        py_executable = os.path.abspath(install_python(
+        self._py_executable = os.path.abspath(install_python(
         self._home_dir, self._lib_dir, self._inc_dir, self._bin_dir,
             site_packages=self._options.system_site_packages, clear=self._options.clear))
 
+        self.install_distutils()
+        if self.should_install_distribute():
+            self.install_distribute()
+        else:
+            self.install_setuptools()
+        self.install_pip()
+        self.install_activate()
+
+    def install_distutils(self):
         install_distutils(self._home_dir)
 
+    def should_install_distribute(self):
         # use_distribute also is True if VIRTUALENV_DISTRIBUTE env var is set
         # we also check VIRTUALENV_USE_DISTRIBUTE for backwards compatibility
-        if self._options.use_distribute or os.environ.get('VIRTUALENV_USE_DISTRIBUTE'):
-            install_distribute(py_executable, unzip=self._options.unzip_setuptools,
-                               search_dirs=self._options.search_dirs,
-                               never_download=self._options.never_download)
-        else:
-            install_setuptools(py_executable, unzip=self._options.unzip_setuptools,
-                               search_dirs=self._options.search_dirs,
-                               never_download=self._options.never_download)
+        return self._options.use_distribute or os.environ.get('VIRTUALENV_USE_DISTRIBUTE')
 
-        install_pip(py_executable, search_dirs=self._options.search_dirs,
+    def install_distribute(self):
+        install_distribute(self._py_executable, unzip=self._options.unzip_setuptools,
+                           search_dirs=self._options.search_dirs,
+                           never_download=self._options.never_download)
+
+    def install_setuptools(self):
+        install_setuptools(self._py_executable, unzip=self._options.unzip_setuptools,
+                           search_dirs=self._options.search_dirs,
+                           never_download=self._options.never_download)
+
+    def install_pip(self):
+        install_pip(self._py_executable,
+                    search_dirs=self._options.search_dirs,
                     never_download=self._options.never_download)
 
     def install_activate(self):
